@@ -38,7 +38,7 @@ const db = new JSQL();
 
 ---
 
-## 📘 Usage with `.query()` Only
+## 📘 Usage
 
 ### 1. INSERT
 
