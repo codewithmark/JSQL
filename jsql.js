@@ -76,22 +76,70 @@ class JSQL {
 
   exportToCSV(table) {
     const rows = this.data[table] || [];
-    if (rows.length === 0) return '';
+    if (!rows.length) return;
+
     const headers = Object.keys(rows[0]);
-    const csv = [headers.join(',')];
+    const schema = this.schemas[table] || {};
+    const schemaHeader = `#schema: ${JSON.stringify(schema)}`;
+
+    const csv = [schemaHeader, headers.join(',')];
     for (const row of rows) {
       csv.push(headers.map(h => JSON.stringify(row[h] ?? '')).join(','));
     }
-    return csv.join('\n');
+    const csvText = csv.join('\n');
+
+    const timestamp = new Date().toISOString().replace(/[:T]/g, '-').split('.')[0];
+    const filename = `${table}_${timestamp}.csv`;
+
+    // Browser
+    if (typeof window !== 'undefined' && typeof document !== 'undefined') {
+      const blob = new Blob([csvText], { type: 'text/csv' });
+      const url = URL.createObjectURL(blob);
+      const a = document.createElement('a');
+      a.href = url;
+      a.download = filename;
+      a.click();
+    }
+    // Node.js
+    else if (typeof module !== 'undefined' && typeof require === 'function') {
+      const fs = require('fs');
+      fs.writeFileSync(filename, csvText);
+      fs.writeFileSync(`${table}_schema.json`, JSON.stringify(schema, null, 2));
+    }
+
+    return csvText;
   }
 
-  importFromCSV(table, csvText) {
+  importFromCSV(table, source) {
+    if (typeof source === 'string') {
+      this._importCSVText(table, source);
+    } else if (typeof File !== 'undefined' && source instanceof File) {
+      const reader = new FileReader();
+      reader.onload = (e) => this._importCSVText(table, e.target.result);
+      reader.readAsText(source);
+    } else {
+      throw new Error('Unsupported CSV source: must be string or File');
+    }
+  }
+
+  _importCSVText(table, csvText) {
     const lines = csvText.trim().split('\n');
-    const headers = lines[0].split(',');
+    let schema = {};
+
+    if (lines[0].startsWith('#schema:')) {
+      schema = JSON.parse(lines[0].replace('#schema:', '').trim());
+      this.defineTable(table, schema);
+      lines.shift();
+    }
+
+    const headers = lines[0].split(',').map(h => h.trim());
     const items = lines.slice(1).map(line => {
       const values = line.split(',').map(v => v.replace(/^"(.*)"$/, '$1'));
       const obj = {};
-      headers.forEach((h, i) => obj[h.trim()] = isNaN(values[i]) ? values[i] : Number(values[i]));
+      headers.forEach((h, i) => {
+        const raw = values[i];
+        obj[h] = raw === '' ? null : isNaN(raw) ? raw : Number(raw);
+      });
       return obj;
     });
     this.insert(table, items);
@@ -157,7 +205,7 @@ class JSQL {
     const parts = str.split(/AND/i);
     for (const part of parts) {
       const [key, val] = part.trim().split('=');
-      obj[key.trim()] = val?.replace(/^["']|["']$/g, '').trim();
+      obj[key.trim()] = val?.replace(/^['"]|['"]$/g, '').trim();
     }
     return obj;
   }
@@ -169,7 +217,6 @@ class JSQL {
   }
 }
 
-// Export for Node.js or Browser
 if (typeof module !== 'undefined' && module.exports) {
   module.exports = JSQL;
 } else {
