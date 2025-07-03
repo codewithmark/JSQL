@@ -21,14 +21,13 @@ class JSQL {
     }
 
     const schema = this.schemas[table];
-
     for (const item of list) {
       for (const [key, type] of Object.entries(schema)) {
         if (!(key in item)) throw new Error(`Missing field "${key}"`);
         if (typeof item[key] !== type) throw new Error(`Field "${key}" must be type ${type}`);
       }
 
-      if (!item.id) item.id = crypto.randomUUID?.() || Math.random().toString(36).slice(2);
+      if (!item.id) item.id = this._generateId();
       if (!item.createdAt) item.createdAt = new Date().toISOString();
 
       this.data[table].push(item);
@@ -48,6 +47,7 @@ class JSQL {
     const whereFn = whereObj
       ? (row) => Object.entries(whereObj).every(([k, v]) => row[k] === v)
       : (row) => updates.id ? row.id === updates.id : true;
+
     const list = Array.isArray(updates) ? updates : [updates];
     let count = 0;
 
@@ -72,6 +72,7 @@ class JSQL {
     const whereFn = whereObj
       ? (row) => Object.entries(whereObj).every(([k, v]) => row[k] === v)
       : () => true;
+
     const before = this.data[table]?.length || 0;
     this.data[table] = this.data[table]?.filter(row => !whereFn(row)) || [];
     return before - this.data[table].length;
@@ -87,21 +88,13 @@ class JSQL {
   }
 
   query(sql, params = []) {
-    const selectRegex = /SELECT\s+(.+?)\s+FROM\s+(.+?)(?:\s+WHERE\s+(.+?))?(?:\s+GROUP\s+BY\s+(\w+))?(?:\s+HAVING\s+(.+?))?(?:\s+ORDER\s+BY\s+(\w+)(?:\s+(ASC|DESC))?)?(?:\s+LIMIT\s+(\d+))?/i;
-    const insertRegex = /INSERT INTO (\w+)(?:\s+VALUES\s+\?)?/i;
-    const updateDynamicRegex = /UPDATE (\w+) SET \?(?:\s+WHERE\s+\?)?/i;
-    const deleteDynamicRegex = /DELETE FROM (\w+)(?:\s+WHERE\s+\?)?/i;
-    const match = sql.match(selectRegex) || sql.match(insertRegex) || sql.match(updateDynamicRegex) || sql.match(deleteDynamicRegex);
-    if (!match) throw new Error('Invalid SQL');
+    const insert = /INSERT INTO (\w+)(?:\s+VALUES\s+\?)?/i;
+    const update = /UPDATE (\w+) SET \?(?:\s+WHERE\s+\?)?/i;
+    const del = /DELETE FROM (\w+)(?:\s+WHERE\s+\?)?/i;
 
-    if (sql.startsWith('UPDATE')) {
-      const [, table] = match;
-      const updates = params[0];
-      const whereObj = params[1] || null;
-      return this.update(table, updates, whereObj);
-    }
+    let match;
 
-    if (sql.startsWith('INSERT')) {
+    if ((match = sql.match(insert))) {
       const [, table] = match;
       const items = params[0];
       const list = Array.isArray(items) ? items : [items];
@@ -109,10 +102,17 @@ class JSQL {
       return list.length;
     }
 
-    if (sql.startsWith('DELETE')) {
+    if ((match = sql.match(update))) {
       const [, table] = match;
-      const whereObj = params[0] || null;
-      return this.delete(table, whereObj);
+      const updates = params[0];
+      const where = params[1] || null;
+      return this.update(table, updates, where);
+    }
+
+    if ((match = sql.match(del))) {
+      const [, table] = match;
+      const where = params[0] || null;
+      return this.delete(table, where);
     }
 
     throw new Error('Only INSERT, UPDATE, DELETE supported in query');
@@ -197,4 +197,16 @@ class JSQL {
     if (v === 'false') return false;
     return v.replace(/^['"]|['"]$/g, '');
   }
+
+  _generateId() {
+    if (typeof crypto !== 'undefined' && crypto.randomUUID) return crypto.randomUUID();
+    return Math.random().toString(36).substring(2);
+  }
+}
+
+// Export for Node.js or expose to browser
+if (typeof module !== 'undefined' && module.exports) {
+  module.exports = JSQL;
+} else {
+  window.JSQL = JSQL;
 }
