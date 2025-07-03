@@ -38,10 +38,6 @@ class JSQL {
     return this.data[table]?.filter(whereFn) || [];
   }
 
-  findOne(table, whereFn = () => true) {
-    return this.select(table, whereFn)[0] || null;
-  }
-
   update(table, updates, whereObj = null) {
     const schema = this.schemas[table];
     const whereFn = whereObj
@@ -78,28 +74,42 @@ class JSQL {
     return before - this.data[table].length;
   }
 
-  count(table, whereFn = () => true) {
-    return this.select(table, whereFn).length;
+  exportToCSV(table) {
+    const rows = this.data[table] || [];
+    if (rows.length === 0) return '';
+    const headers = Object.keys(rows[0]);
+    const csv = [headers.join(',')];
+    for (const row of rows) {
+      csv.push(headers.map(h => JSON.stringify(row[h] ?? '')).join(','));
+    }
+    return csv.join('\n');
   }
 
-  clear() {
-    this.data = {};
-    this.schemas = {};
+  importFromCSV(table, csvText) {
+    const lines = csvText.trim().split('\n');
+    const headers = lines[0].split(',');
+    const items = lines.slice(1).map(line => {
+      const values = line.split(',').map(v => v.replace(/^"(.*)"$/, '$1'));
+      const obj = {};
+      headers.forEach((h, i) => obj[h.trim()] = isNaN(values[i]) ? values[i] : Number(values[i]));
+      return obj;
+    });
+    this.insert(table, items);
   }
 
   query(sql, params = []) {
-    const insert = /INSERT INTO (\w+)(?:\s+VALUES\s+\?)?/i;
+    const insert = /INSERT INTO (\w+)(?:\s+\?)?/i;
     const update = /UPDATE (\w+) SET \?(?:\s+WHERE\s+\?)?/i;
     const del = /DELETE FROM (\w+)(?:\s+WHERE\s+\?)?/i;
+    const select = /SELECT \* FROM (\w+)(?:\s+WHERE\s+(.+?))?(?:\s+ORDER BY\s+(\w+)(?:\s+(ASC|DESC))?)?(?:\s+LIMIT\s+(\d+))?/i;
 
     let match;
 
     if ((match = sql.match(insert))) {
       const [, table] = match;
       const items = params[0];
-      const list = Array.isArray(items) ? items : [items];
-      this.insert(table, list);
-      return list.length;
+      this.insert(table, items);
+      return items.length;
     }
 
     if ((match = sql.match(update))) {
@@ -115,96 +125,51 @@ class JSQL {
       return this.delete(table, where);
     }
 
-    throw new Error('Only INSERT, UPDATE, DELETE supported in query');
+    if ((match = sql.match(select))) {
+      const [, table, whereClause, orderBy, orderDir, limit] = match;
+      let rows = [...(this.data[table] || [])];
+
+      if (whereClause) {
+        rows = rows.filter(row => {
+          return Object.entries(this._parseWhereObject(whereClause)).every(([key, val]) => row[key] == val);
+        });
+      }
+
+      if (orderBy) {
+        rows.sort((a, b) => {
+          if (orderDir?.toUpperCase() === 'DESC') return a[orderBy] < b[orderBy] ? 1 : -1;
+          return a[orderBy] > b[orderBy] ? 1 : -1;
+        });
+      }
+
+      if (limit) {
+        rows = rows.slice(0, Number(limit));
+      }
+
+      return rows;
+    }
+
+    throw new Error('Invalid SQL query');
   }
 
-  _evalCondition(row, cond) {
-    const notInMatch = cond.match(/^(\w+)\s+NOT\s+IN\s+\(([^)]+)\)$/i);
-    if (notInMatch) {
-      const [, key, values] = notInMatch;
-      const valList = values.split(',').map(v => this._parseValue(v.trim()));
-      return !valList.includes(row[key]);
+  _parseWhereObject(str) {
+    const obj = {};
+    const parts = str.split(/AND/i);
+    for (const part of parts) {
+      const [key, val] = part.trim().split('=');
+      obj[key.trim()] = val?.replace(/^["']|["']$/g, '').trim();
     }
-
-    const inMatch = cond.match(/^(\w+)\s+IN\s+\(([^)]+)\)$/i);
-    if (inMatch) {
-      const [, key, values] = inMatch;
-      const valList = values.split(',').map(v => this._parseValue(v.trim()));
-      return valList.includes(row[key]);
-    }
-
-    const notLikeMatch = cond.match(/^(\w+)\s+NOT\s+LIKE\s+['"](.+?)['"]$/i);
-    if (notLikeMatch) {
-      const [, key, pattern] = notLikeMatch;
-      const regex = new RegExp('^' + pattern.replace(/%/g, '.*') + '$', 'i');
-      return !regex.test(row[key]);
-    }
-
-    const likeMatch = cond.match(/^(\w+)\s+LIKE\s+['"](.+?)['"]$/i);
-    if (likeMatch) {
-      const [, key, pattern] = likeMatch;
-      const regex = new RegExp('^' + pattern.replace(/%/g, '.*') + '$', 'i');
-      return regex.test(row[key]);
-    }
-
-    const betweenMatch = cond.match(/^(\w+)\s+BETWEEN\s+(\S+)\s+AND\s+(\S+)$/i);
-    if (betweenMatch) {
-      const [, key, val1, val2] = betweenMatch;
-      const a = this._parseValue(val1);
-      const b = this._parseValue(val2);
-      return row[key] >= a && row[key] <= b;
-    }
-
-    const notBetweenMatch = cond.match(/^(\w+)\s+NOT\s+BETWEEN\s+(\S+)\s+AND\s+(\S+)$/i);
-    if (notBetweenMatch) {
-      const [, key, val1, val2] = notBetweenMatch;
-      const a = this._parseValue(val1);
-      const b = this._parseValue(val2);
-      return row[key] < a || row[key] > b;
-    }
-
-    const isNullMatch = cond.match(/^(\w+)\s+IS\s+NULL$/i);
-    if (isNullMatch) {
-      const [, key] = isNullMatch;
-      return row[key] === null || row[key] === undefined;
-    }
-
-    const isNotNullMatch = cond.match(/^(\w+)\s+IS\s+NOT\s+NULL$/i);
-    if (isNotNullMatch) {
-      const [, key] = isNotNullMatch;
-      return row[key] !== null && row[key] !== undefined;
-    }
-
-    const match = cond.match(/^(\w+)\s*(=|!=|<=|>=|<|>)\s*["']?(.+?)["']?$/);
-    if (!match) return false;
-    const [, key, op, rawVal] = match;
-    const val = this._parseValue(rawVal);
-    const field = row[key];
-    switch (op) {
-      case '=': return field == val;
-      case '!=': return field != val;
-      case '<': return field < val;
-      case '>': return field > val;
-      case '<=': return field <= val;
-      case '>=': return field >= val;
-      default: return false;
-    }
-  }
-
-  _parseValue(v) {
-    if (!isNaN(v)) return Number(v);
-    if (v === 'true') return true;
-    if (v === 'false') return false;
-    return v.replace(/^['"]|['"]$/g, '');
+    return obj;
   }
 
   _generateId() {
-    if (typeof crypto !== 'undefined' && crypto.randomUUID) return crypto.randomUUID();
-    return Math.random().toString(36).substring(2);
+    return typeof crypto !== 'undefined' && crypto.randomUUID
+      ? crypto.randomUUID()
+      : Math.random().toString(36).substring(2, 10);
   }
 }
 
-// Export for Node.js or expose to browser
+// Export for Node.js or Browser
 if (typeof module !== 'undefined' && module.exports) {
   module.exports = JSQL;
 } else {
