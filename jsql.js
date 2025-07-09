@@ -35,7 +35,8 @@ class JSQL {
   }
 
   select(table, whereFn = () => true) {
-    return this.data[table]?.filter(whereFn) || [];
+    if (!this.data[table]) throw new Error(`Table "${table}" does not exist.`);
+    return this.data[table].filter(whereFn);
   }
 
   update(table, updates, whereObj = null) {
@@ -48,7 +49,10 @@ class JSQL {
     let count = 0;
 
     this.data[table] = this.data[table].map(row => {
-      const match = list.find(item => item.id === row.id) || (whereObj && whereFn(row) ? updates : null);
+      let match = list.find(item => item.id === row.id);
+      if (!match && whereObj && whereFn(row)) {
+        match = updates;
+      }
       if (match) {
         const updated = { ...row, ...match };
         for (const [key, type] of Object.entries(schema)) {
@@ -84,14 +88,16 @@ class JSQL {
 
     const csv = [schemaHeader, headers.join(',')];
     for (const row of rows) {
-      csv.push(headers.map(h => JSON.stringify(row[h] ?? '')).join(','));
+      csv.push(headers.map(h => {
+        const val = String(row[h] ?? '');
+        return `"${val.replace(/"/g, '""')}"`;
+      }).join(','));
     }
     const csvText = csv.join('\n');
 
     const timestamp = new Date().toISOString().replace(/[:T]/g, '-').split('.')[0];
     const filename = `${table}_${timestamp}.csv`;
 
-    // Browser
     if (typeof window !== 'undefined' && typeof document !== 'undefined') {
       const blob = new Blob([csvText], { type: 'text/csv' });
       const url = URL.createObjectURL(blob);
@@ -99,9 +105,7 @@ class JSQL {
       a.href = url;
       a.download = filename;
       a.click();
-    }
-    // Node.js
-    else if (typeof module !== 'undefined' && typeof require === 'function') {
+    } else if (typeof module !== 'undefined' && typeof require === 'function') {
       const fs = require('fs');
       fs.writeFileSync(filename, csvText);
       fs.writeFileSync(`${table}_schema.json`, JSON.stringify(schema, null, 2));
@@ -132,24 +136,29 @@ class JSQL {
       lines.shift();
     }
 
-    const headers = lines[0].split(',').map(h => h.trim());
+    const headers = lines[0].split(',').map(h => h.trim().replace(/^"|"$/g, ''));
     const items = lines.slice(1).map(line => {
-      const values = line.split(',').map(v => v.replace(/^"(.*)"$/, '$1'));
+      const values = line.match(/(".*?"|[^",\s]+)(?=\s*,|\s*$)/g) || [];
       const obj = {};
       headers.forEach((h, i) => {
-        const raw = values[i];
-        obj[h] = raw === '' ? null : isNaN(raw) ? raw : Number(raw);
+        const raw = values[i]?.replace(/^"|"$/g, '').replace(/""/g, '"');
+        try {
+          obj[h] = JSON.parse(raw);
+        } catch {
+          obj[h] = raw;
+        }
       });
       return obj;
     });
+
     this.insert(table, items);
   }
 
   query(sql, params = []) {
-    const insert = /INSERT INTO (\w+)(?:\s+\?)?/i;
-    const update = /UPDATE (\w+) SET \?(?:\s+WHERE\s+\?)?/i;
-    const del = /DELETE FROM (\w+)(?:\s+WHERE\s+\?)?/i;
-    const select = /SELECT \* FROM (\w+)(?:\s+WHERE\s+(.+?))?(?:\s+ORDER BY\s+(\w+)(?:\s+(ASC|DESC))?)?(?:\s+LIMIT\s+(\d+))?/i;
+    const insert = /^INSERT INTO (\w+)(?:\s+\?)?$/i;
+    const update = /^UPDATE (\w+) SET \?(?:\s+WHERE\s+\?)?$/i;
+    const del = /^DELETE FROM (\w+)(?:\s+WHERE\s+\?)?$/i;
+    const select = /^SELECT \* FROM (\w+)(?:\s+WHERE\s+(.+?))?(?:\s+ORDER BY\s+(\w+)(?:\s+(ASC|DESC))?)?(?:\s+LIMIT\s+(\d+))?$/i;
 
     let match;
 
@@ -157,7 +166,7 @@ class JSQL {
       const [, table] = match;
       const items = params[0];
       this.insert(table, items);
-      return items.length;
+      return Array.isArray(items) ? items.length : 1;
     }
 
     if ((match = sql.match(update))) {
@@ -178,8 +187,9 @@ class JSQL {
       let rows = [...(this.data[table] || [])];
 
       if (whereClause) {
+        const whereObj = this._parseWhereObject(whereClause);
         rows = rows.filter(row => {
-          return Object.entries(this._parseWhereObject(whereClause)).every(([key, val]) => row[key] == val);
+          return Object.entries(whereObj).every(([key, val]) => row[key] == val);
         });
       }
 
